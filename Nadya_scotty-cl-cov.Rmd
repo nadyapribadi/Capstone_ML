@@ -1,0 +1,794 @@
+---
+title: "Nadya_scotty-cl-cov"
+author: "Nadya"
+date: "27/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(lubridate)
+```
+
+```{r}
+scotty_train <- read_csv("data/data-train.csv")
+
+```
+```{r}
+glimpse(scotty_train)
+```
+
+
+
+```{r}
+scotty_train[,c("src_area", "src_sub_area", "dest_area", "dest_sub_area", "status")] <- lapply(scotty_train[,c("src_area", "src_sub_area","dest_area","dest_sub_area","status")], as.factor)
+
+scotty_train <- rename(scotty_train, datetime = start_time)
+```
+
+
+```{r}
+scotty_test <- read_csv("data/data-test.csv")
+
+scotty_test$coverage <- as.factor(scotty_test$coverage)
+
+scotty_test
+```
+
+
+# Data Pre-processes
+## data aggregation
+### floor the date to specific time level
+```{r}
+scotty_train$datetime <- floor_date(scotty_train$datetime, "hour")
+scotty_train
+```
+
+### group the data for aggregation/summarise
+```{r}
+scotty_train <- scotty_train %>%
+   group_by(datetime, src_area, status) %>%
+   summarise(n = n()) %>%
+   ungroup()
+
+scotty_train
+```
+
+```{r}
+scotty_train %>% 
+  is.na() %>% 
+  colSums()
+```
+
+## time series padding
+### start and end of padding interval
+```{r}
+summary(scotty_train)
+```
+
+```{r}
+start <- ymd_hms("2017-10-01 00:00:00")
+end <- ymd_hms("2017-12-02 23:00:00 ")
+
+time.interval <- start %--% end
+
+time.duration <- as.duration(time.interval)
+
+time.duration / dhours(1)
+```
+
+
+### Padding the time data in specific time interval 
+```{r}
+library(padr)
+scotty_train <- scotty_train %>%
+   group_by(src_area,status) %>%
+   pad() 
+
+scotty_train
+```
+
+
+```{r}
+scotty_train %>% 
+  is.na() %>% 
+  colSums()
+```
+
+
+
+### Fill the NA count on the new time interval with 0 or any other imputation method
+```{r}
+# mengisi NA dgn 0
+scotty_train <- scotty_train %>% 
+  mutate(n = replace_na(n, replace = 0))
+
+scotty_train
+```
+
+
+# Exploratory Data Analysis
+## Explored the state in the target distribution
+
+```{r}
+long_scotty_train <- scotty_train %>% 
+   spread(status, n) %>% 
+   mutate(nodrivers = replace_na(nodrivers, replace = 0)) %>% 
+   mutate(coverage = if_else(nodrivers == 0, "1", "0")) %>% 
+   mutate(coverage = as.factor(coverage))
+
+long_scotty_train
+```
+
+0 = insufficient
+1 = sufficient
+
+
+```{r}
+colSums(is.na(long_scotty_train))
+```
+
+### proportion of class of target variable overall
+```{r}
+prop.table(table(scotty_train$status))
+```
+
+### proportion of class of target variable in each area (3 areas)
+```{r}
+prop.table(table(long_scotty_train$src_area))
+```
+
+## Explored the relation between the target and the features
+### pattern or correlation between target and features
+
+```{r}
+pairs(long_scotty_train[,1:5])
+```
+
+### heatmap of time (hour) and weekdays, grouped by area and find the pattern
+
+
+```{r}
+long_scotty_train$wdays <- weekdays(long_scotty_train$datetime)
+long_scotty_train <- long_scotty_train %>% 
+   mutate(wdays = as.factor(wdays))
+
+hm_matrix <- long_scotty_train %>%
+   select(src_area, wdays, coverage) %>% 
+   group_by(src_area)
+
+hm_matrix <- data.matrix(hm_matrix)
+
+heatmap(x = hm_matrix, scale="column")
+```
+
+# Model Fitting and Evaluation
+## prepare cross-validation data
+### proportion of the training vs testing dataset
+```{r}
+RNGkind(sample.kind = "Rounding")
+set.seed(417)
+index <- sample(x = nrow(long_scotty_train), size = 0.8*nrow(long_scotty_train)) 
+data_train <- long_scotty_train[index,]
+data_validate <- long_scotty_train[-index, ]
+```
+
+## data pre-process and feature engineering
+### details of data pre-processing
+```{r}
+prop.table(table(data_train$src_area))
+```
+
+### feature engineering/variable selection, including removing unused variable
+```{r}
+data_train <- data_train[,-3]
+data_train
+```
+
+### up-sample or down-sample (based on the class proportion)
+```{r}
+library(caret)
+
+set.seed(417)
+up_train <- upSample(x = data_train[, -ncol(data_train)],
+                         y = data_train$src_area)
+table(up_train$src_area)
+```
+
+
+
+```{r}
+set.seed(417)
+up_validate <- upSample(x = data_validate[, -ncol(data_validate)],
+                         y = data_validate$src_area)
+table(up_validate$src_area)
+```
+
+
+```{r}
+set.seed(417)
+down_train <- downSample(x = data_train[, -ncol(data_train)],
+                         y = data_train$src_area)
+table(down_train$src_area)
+```
+
+```{r}
+set.seed(417)
+down_validate <- downSample(x = data_validate[, -ncol(data_validate)],
+                         y = data_validate$src_area)
+table(down_validate$src_area)
+```
+
+
+#  fitting and evaluation
+### model to be used
+
+$$ y = bo + bn * xn $$
+
+
+#### model 1 = up sample with 1 predictor logistic regression
+
+
+
+```{r}
+summary(up_train)
+```
+
+coverage --> sufficient / insufficient
+
+
+```{r}
+model_1 <- glm(formula = coverage ~ src_area, family = "binomial", data = up_train)
+summary(model_1)
+```
+
+```{r}
+library(gtools)
+# odds per area ketika sufficient 
+# --> rasio antara peluang kejadian A dengan peluang kejadian bukan A
+exp(model_1$coefficients[[2]])
+exp(model_1$coefficients[[3]])
+
+```
+
+```{r}
+# peluang --> transform log of odds to probability
+inv.logit(model_1$coefficients[[2]])
+inv.logit(model_1$coefficients[[3]])
+```
+
+
+$$log(odds) = -0.56185 + 2.10361 * sxk8 - 0.97991 * sxk9 $$
+
+
+Interpretasi:
+- area sxk8 lebih memungkinkan sufficient sebesar 8.19 kali dibandingkan 2 area lainnya
+
+```{r}
+up_train$prob_area <- predict(model_1, up_train,  type = "response")
+up_train$predicts_area <- as.factor(ifelse(up_train$prob_area > 0.5, 
+                                                        "0","1"))
+
+up_validate$prob_area <- predict(model_1, up_validate,  type = "response")
+up_validate$predicts_area <- as.factor(ifelse(up_validate$prob_area > 0.5, 
+                                                        "0","1"))
+
+```
+
+
+
+```{r}
+confusionMatrix(as.factor(up_validate$predicts_area), 
+                up_validate$coverage,
+                positive = "1")
+```
+
+
+#### model 2 = down sample with 1 predictor
+
+
+```{r}
+summary(down_train)
+```
+
+coverage --> sufficient / insufficient
+
+
+```{r}
+model_2 <- glm(formula = coverage ~ src_area, family = "binomial", data = down_train)
+summary(model_2)
+```
+
+```{r}
+library(gtools)
+# odds per area ketika sufficient 
+# --> rasio antara peluang kejadian A dengan peluang kejadian bukan A
+exp(model_2$coefficients[[2]])
+exp(model_2$coefficients[[3]])
+
+```
+
+```{r}
+# peluang --> transform log of odds to probability
+inv.logit(model_2$coefficients[[2]])
+inv.logit(model_2$coefficients[[3]])
+```
+
+
+$$log(odds) = -0.55764 + 2.10591 * sxk8 - -0.99064 * sxk9 $$
+
+
+Interpretasi:
+- area sxk8 lebih memungkinkan sufficient sebesar 8.21 kali dibandingkan 2 area lainnya
+
+
+```{r}
+down_train$prob_area <- predict(model_2, down_train,  type = "response")
+down_train$predicts_area <- as.factor(ifelse(down_train$prob_area > 0.5, 
+                                                        "0","1"))
+
+down_validate$prob_area <- predict(model_2, down_validate,  type = "response")
+down_validate$predicts_area <- as.factor(ifelse(down_validate$prob_area > 0.5, 
+                                                        "0","1"))
+
+```
+
+
+
+```{r}
+confusionMatrix(as.factor(down_validate$predicts_area), 
+                down_validate$coverage,
+                positive = "1")
+```
+
+
+#### model 3 = decision tree up sample
+
+```{r}
+library(partykit)
+
+model_3 <- ctree(formula = coverage ~ src_area,
+                       data = up_train)
+
+plot(model_3, type = "simple")
+```
+
+```{r}
+model_3
+```
+
+```{r}
+# prediksi kelas di data test
+pred_up_validate <- predict(object = model_3, 
+                          newdata = up_validate,
+                          type = "response")
+
+# confusion matrix data test
+confusionMatrix(data = pred_up_validate,
+                reference = up_validate$coverage,
+                positive = "1")
+```
+
+```{r}
+# prediksi kelas di data train
+pred_up_train <- predict(object = model_3, 
+                          newdata = up_train,
+                          type = "response")
+
+# confusion matrix data train
+confusionMatrix(data = pred_up_train,
+                reference = up_train$coverage,
+                positive = "1")
+```
+
+- Recall di data train: 0.6043
+- Recall di data test: 0.6000
+
+Hasil: cenderung lebih baik pada data train dibandingkan data test. Model ini dikatakan sebagai model yang **overfitting**. Karena performa model belum cukup baik, perlu dilakukan *model tuning*.
+
+```{r}
+model_3_tuned <- ctree(formula = coverage ~ src_area,
+                       data = up_train,
+                             control = ctree_control(mincriterion = 0,
+                                                     minsplit = 50,
+                                                     minbucket = 15))
+
+plot(model_3_tuned, type = "simple")
+```
+
+
+```{r}
+# prediksi kelas di data test
+pred_up_validate_tuned <- predict(object = model_3_tuned, 
+                          newdata = up_validate,
+                          type = "response")
+
+# confusion matrix data test
+confusionMatrix(data = pred_up_validate_tuned,
+                reference = up_validate$coverage,
+                positive = "1")
+```
+
+```{r}
+# prediksi kelas di data train
+pred_up_train_tuned <- predict(object = model_3_tuned, 
+                          newdata = up_train,
+                          type = "response")
+
+# confusion matrix data train
+confusionMatrix(data = pred_up_train_tuned,
+                reference = up_train$coverage,
+                positive = "1")
+
+```
+
+- Recall di data train: 0.6043
+- Recall di data test: 0.6000
+
+
+#### model 4 = decision tree down sample
+
+```{r}
+library(partykit)
+
+model_4 <- ctree(formula = coverage ~ src_area,
+                       data = down_train)
+
+plot(model_4, type = "simple")
+```
+
+```{r}
+model_4
+```
+
+```{r}
+# prediksi kelas di data test
+pred_down_validate <- predict(object = model_4, 
+                          newdata = down_validate,
+                          type = "response")
+
+# confusion matrix data test
+confusionMatrix(data = pred_down_validate,
+                reference = down_validate$coverage,
+                positive = "1")
+```
+
+```{r}
+# prediksi kelas di data train
+pred_down_train <- predict(object = model_4, 
+                          newdata = down_train,
+                          type = "response")
+
+# confusion matrix data train
+confusionMatrix(data = pred_down_train,
+                reference = down_train$coverage,
+                positive = "1")
+```
+
+- Recall di data train: 0.6046
+- Recall di data test: 0.5965
+
+Hasil: cenderung lebih baik pada data train dibandingkan data test. Model ini dikatakan sebagai model yang **overfitting**. Karena performa model belum cukup baik, perlu dilakukan *model tuning*.
+
+```{r}
+model_4_tuned <- ctree(formula = coverage ~ src_area,
+                       data = down_train,
+                             control = ctree_control(mincriterion = 0,
+                                                     minsplit = 50,
+                                                     minbucket = 15))
+
+plot(model_4_tuned, type = "simple")
+```
+
+
+```{r}
+# prediksi kelas di data test
+pred_down_validate_tuned <- predict(object = model_4_tuned, 
+                          newdata = down_validate,
+                          type = "response")
+
+# confusion matrix data test
+confusionMatrix(data = pred_down_validate_tuned,
+                reference = down_validate$coverage,
+                positive = "1")
+```
+
+```{r}
+# prediksi kelas di data train
+pred_down_train_tuned <- predict(object = model_4_tuned, 
+                          newdata = down_train,
+                          type = "response")
+
+# confusion matrix data train
+confusionMatrix(data = pred_down_train_tuned,
+                reference = down_train$coverage,
+                positive = "1")
+
+```
+
+- Recall di data train: 0.6046
+- Recall di data test: 0.5965
+
+#### model 5 = random forest down sample
+
+```{r}
+set.seed(417)
+ 
+ctrl <- trainControl(method = "repeatedcv",
+                   number = 5, # k-fold
+                   repeats = 3) # repetisi
+
+model_5 <- train(coverage ~ src_area,
+                 data = up_train,
+                 method = "rf", # random forest
+                 trControl = ctrl)
+
+saveRDS(model_5, "model_5.RDS") # simpan model
+```
+```{r}
+# read model
+model_5 <- readRDS("model_5.RDS")
+model_5
+```
+
+```{r}
+library(randomForest)
+model_5$finalModel
+```
+
+```{r}
+#accuracy model
+100 - 23.86
+```
+
+```{r}
+up_validate_pred_cov <- predict(model_5, up_validate, type = "raw")
+cm_fb_up <- confusionMatrix(data = up_validate_pred_cov,
+                         reference = up_validate$coverage)
+cm_fb_up$table
+```
+
+```{r}
+varImp(model_5)
+plot(varImp(model_5))
+```
+
+
+#### model 6 = random forest down sample
+
+```{r}
+set.seed(417)
+ 
+ctrl <- trainControl(method = "repeatedcv",
+                   number = 5, # k-fold
+                   repeats = 3) # repetisi
+
+model_6 <- train(coverage ~ src_area,
+                 data = down_train,
+                 method = "rf", # random forest
+                 trControl = ctrl)
+
+saveRDS(model_6, "model_6.RDS") # simpan model
+```
+
+```{r}
+# read model
+model_6 <- readRDS("model_6.RDS")
+model_6
+```
+
+```{r}
+library(randomForest)
+model_6$finalModel
+```
+
+```{r}
+#accuracy model
+100 - 23.83
+```
+
+```{r}
+down_validate_pred_cov <- predict(model_6, down_validate, type = "raw")
+cm_fb_down <- confusionMatrix(data = down_validate_pred_cov,
+                         reference = down_validate$coverage)
+cm_fb_down$table
+```
+
+```{r}
+varImp(model_6)
+plot(varImp(model_6))
+```
+
+## model comparison
+
+```{r}
+read_csv("data/comparison.csv")
+```
+
+### accuracy, precision, sensitivity, and specificity. which is important?
+
+Here is the rank of importance from 4 criteria:
+
+	1. Precision --> focus on true positive
+	2. Specificity --> don’t want any false positives
+	3. Accuracy --> false negative and false positive equally costly
+	4. Recall/ Sensitivity -->  false positives is far better than false negatives
+
+
+With higher precision, the model is also has high confident and better.
+then we can take a look with specifity value. due to its nature of the case, we need to avoid false positive. We cannot tolerate if the model can predicts the coverage is sufficient while in the reality its insufficient.
+
+
+### sensitivity-specificity trade-off
+
+There is a trade off between sensitivity and specificity. Its on false positives.
+Recal/ Sensitivity is more favors false positive and specificity don't
+
+based on above table and analysis, we can conclude that decision tree with downsample (model 4) is the best model from 6 model.
+
+This model has the highest percentage on precision and specificity
+
+# Prediction Performance
+
+## Validation dataset
+
+- Reached Accuracy > 75% in (your own) validation dataset
+Yes. 75.92%
+
+- Reached Sensitivity > 85% in (your own) validation dataset
+No. 59.65%
+
+- Reached Specificity > 70% in (your own) validation dataset
+Yes. 90.89%
+
+- Reached Precision > 75% in (your own) validation dataset
+Yes. 85.77%
+
+## test dataset
+
+```{r}
+scotty_test_prep <- down_train %>% 
+   mutate(datetime = datetime) %>% 
+   select(src_area, datetime, coverage)
+
+scotty_test_prep
+
+```
+
+
+```{r}
+scotty_test %>%
+   group_by(src_area) %>%
+   pad() 
+```
+
+
+```{r}
+scotty_test$coverage <- predict(object = model_4_tuned, 
+                          newdata = scotty_test %>% 
+                             select(-coverage),
+                          type = "response")
+scotty_test
+```
+
+```{r}
+# Predict the target using your model
+scotty_test$coverage <- predict(object = model_4_tuned, 
+                          newdata = scotty_test %>% 
+                             select(-coverage),
+                          type = "response")
+
+scotty_test$coverage <- as.factor(ifelse(scotty_test$coverage == 0, 
+                                                        "insufficient","sufficient"))
+
+# Create submission data
+submission <- scotty_test
+
+# save data
+write.csv(submission, "submission-nadya.csv", row.names = F)
+
+# check first 3 data
+head(submission, 3)
+```
+
+
+- Reached Accuracy > 75% in test dataset
+Yes. 79%
+
+- Reached Sensitivity > 85% in test dataset
+Yes. 91%
+
+- Reached Specificity > 70% in test dataset
+No. 63%
+
+- Reached Precision > 75% in test dataset
+Yes. 75%
+
+
+# Interpretation
+## Use LIME method to interpret the model
+### any pre-processing that you need in order to be more interpretable
+
+```{r}
+library(tidymodels)
+library(lime)
+library(rmarkdown)
+```
+
+```{r}
+#define model spec
+model_spec <- rand_forest(
+  mode = "classification",
+  mtry = 2,
+  trees = 500,
+  min_n = 1)
+
+#define model engine
+model_spec <- set_engine(model_spec,
+                         engine = "ranger",
+                         seed = 123,
+                         num.threads = parallel::detectCores(),
+                         importance = "impurity")
+
+#model fitting
+set.seed(123)
+model <- fit_xy(
+  object = model_spec,
+  x = select(down_train, -coverage),
+  y = select(down_train, coverage))
+```
+
+
+###  features that is used to explain the model
+
+
+### difference between using LIME compared to interpretable machine learning models such as Decision Tree or metrics such as Variable Importance in Random Forest
+```{r}
+
+```
+
+## Interpret the first 4 observation of the plot
+### difference between interpreting black box model with LIME and using an interpretable machine learning model
+```{r}
+
+```
+
+### explanation fit. signify?
+```{r}
+
+```
+
+### the most and the least important factors for each observation
+```{r}
+
+```
+
+
+# Conclusion
+## conclusion of  capstone project
+### goal achieved?
+Yes. We get the best model from 6 model. The model shows which area in which time shows sufficient / insufficient
+
+
+### problem can be solved by machine learning?
+Yes. machine learning method using Decision Tree for solving classification problem
+
+
+### model that is used and how is the performance?
+Model used is from decision tree method with down sample data. 
+the performance: 
+- on validation dataset: higher in accuracy, specificity and precision than target
+- on test dataset: higher in accuracy, sensitivity and precision than target
+
+
+### potential business implementation of your capstone project
+With classification problem using decision tree method in this capstone project can be applied in ride-hailing company that ant to define which area that still need growth in the driver number.
+
+The company can implement a bonus package strategy in area on specific time that categorized as Insufficient Area so that a lot driver can be attracted to it.
+Alternatively, the company need to find a magnet or source of attraction near the area (if its still in the peak hours but still insufficient) and promote this place.
+other alternatives, the company can build a temporary/permanent base camp for the driver near the area. So that the distance not so large between the insufficient area and not.
+
